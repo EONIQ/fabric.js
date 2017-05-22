@@ -4064,6 +4064,1481 @@ fabric.ElementsParser.prototype.checkIfDone = function() {
 })();
 
 (function() {
+    var getPointer = fabric.util.getPointer, degreesToRadians = fabric.util.degreesToRadians, radiansToDegrees = fabric.util.radiansToDegrees, atan2 = Math.atan2, abs = Math.abs, supportLineDash = fabric.StaticCanvas.supports("setLineDash"), STROKE_OFFSET = .5;
+    fabric.Canvas = fabric.util.createClass(fabric.StaticCanvas, {
+        initialize: function(el, options) {
+            options || (options = {});
+            this._initStatic(el, options);
+            this._initInteractive();
+            this._createCacheCanvas();
+        },
+        uniScaleTransform: false,
+        uniScaleKey: "shiftKey",
+        centeredScaling: false,
+        centeredRotation: false,
+        centeredKey: "altKey",
+        altActionKey: "shiftKey",
+        interactive: true,
+        selection: true,
+        selectionKey: "shiftKey",
+        altSelectionKey: null,
+        selectionColor: "rgba(100, 100, 255, 0.3)",
+        selectionDashArray: [],
+        selectionBorderColor: "rgba(255, 255, 255, 0.3)",
+        selectionLineWidth: 1,
+        hoverCursor: "move",
+        moveCursor: "move",
+        defaultCursor: "default",
+        freeDrawingCursor: "crosshair",
+        rotationCursor: "crosshair",
+        containerClass: "canvas-container",
+        perPixelTargetFind: false,
+        targetFindTolerance: 0,
+        skipTargetFind: false,
+        isDrawingMode: false,
+        preserveObjectStacking: false,
+        snapAngle: 0,
+        snapThreshold: null,
+        stopContextMenu: false,
+        fireRightClick: false,
+        fireMiddleClick: false,
+        _initInteractive: function() {
+            this._currentTransform = null;
+            this._groupSelector = null;
+            this._initWrapperElement();
+            this._createUpperCanvas();
+            this._initEventListeners();
+            this._initRetinaScaling();
+            this.freeDrawingBrush = fabric.PencilBrush && new fabric.PencilBrush(this);
+            this.calcOffset();
+        },
+        _chooseObjectsToRender: function() {
+            var activeGroup = this.getActiveGroup(), activeObject = this.getActiveObject(), object, objsToRender = [], activeGroupObjects = [];
+            if ((activeGroup || activeObject) && !this.preserveObjectStacking) {
+                for (var i = 0, length = this._objects.length; i < length; i++) {
+                    object = this._objects[i];
+                    if ((!activeGroup || !activeGroup.contains(object)) && object !== activeObject) {
+                        objsToRender.push(object);
+                    } else {
+                        activeGroupObjects.push(object);
+                    }
+                }
+                if (activeGroup) {
+                    activeGroup._set("_objects", activeGroupObjects);
+                    objsToRender.push(activeGroup);
+                }
+                activeObject && objsToRender.push(activeObject);
+            } else {
+                objsToRender = this._objects;
+            }
+            return objsToRender;
+        },
+        renderAll: function() {
+            if (this.contextTopDirty && !this._groupSelector && !this.isDrawingMode) {
+                this.clearContext(this.contextTop);
+                this.contextTopDirty = false;
+            }
+            var canvasToDrawOn = this.contextContainer;
+            this.renderCanvas(canvasToDrawOn, this._chooseObjectsToRender());
+            return this;
+        },
+        renderTop: function() {
+            var ctx = this.contextTop;
+            this.clearContext(ctx);
+            if (this.selection && this._groupSelector) {
+                this._drawSelection(ctx);
+            }
+            this.fire("after:render");
+            this.contextTopDirty = true;
+            return this;
+        },
+        _resetCurrentTransform: function() {
+            var t = this._currentTransform;
+            t.target.set({
+                scaleX: t.original.scaleX,
+                scaleY: t.original.scaleY,
+                skewX: t.original.skewX,
+                skewY: t.original.skewY,
+                left: t.original.left,
+                top: t.original.top
+            });
+            if (this._shouldCenterTransform(t.target)) {
+                if (t.action === "rotate") {
+                    this._setOriginToCenter(t.target);
+                } else {
+                    if (t.originX !== "center") {
+                        if (t.originX === "right") {
+                            t.mouseXSign = -1;
+                        } else {
+                            t.mouseXSign = 1;
+                        }
+                    }
+                    if (t.originY !== "center") {
+                        if (t.originY === "bottom") {
+                            t.mouseYSign = -1;
+                        } else {
+                            t.mouseYSign = 1;
+                        }
+                    }
+                    t.originX = "center";
+                    t.originY = "center";
+                }
+            } else {
+                t.originX = t.original.originX;
+                t.originY = t.original.originY;
+            }
+        },
+        containsPoint: function(e, target, point) {
+            var ignoreZoom = true, pointer = point || this.getPointer(e, ignoreZoom), xy;
+            if (target.group && target.group === this.getActiveGroup()) {
+                xy = this._normalizePointer(target.group, pointer);
+            } else {
+                xy = {
+                    x: pointer.x,
+                    y: pointer.y
+                };
+            }
+            return target.containsPoint(xy) || target._findTargetCorner(pointer);
+        },
+        _normalizePointer: function(object, pointer) {
+            var m = object.calcTransformMatrix(), invertedM = fabric.util.invertTransform(m), vptPointer = this.restorePointerVpt(pointer);
+            return fabric.util.transformPoint(vptPointer, invertedM);
+        },
+        isTargetTransparent: function(target, x, y) {
+            var hasBorders = target.hasBorders, transparentCorners = target.transparentCorners, ctx = this.contextCache, originalColor = target.selectionBackgroundColor;
+            target.hasBorders = target.transparentCorners = false;
+            target.selectionBackgroundColor = "";
+            ctx.save();
+            ctx.transform.apply(ctx, this.viewportTransform);
+            target.render(ctx);
+            ctx.restore();
+            target.active && target._renderControls(ctx);
+            target.hasBorders = hasBorders;
+            target.transparentCorners = transparentCorners;
+            target.selectionBackgroundColor = originalColor;
+            var isTransparent = fabric.util.isTransparent(ctx, x, y, this.targetFindTolerance);
+            this.clearContext(ctx);
+            return isTransparent;
+        },
+        _shouldClearSelection: function(e, target) {
+            var activeGroup = this.getActiveGroup(), activeObject = this.getActiveObject();
+            return !target || target && activeGroup && !activeGroup.contains(target) && activeGroup !== target && !e[this.selectionKey] || target && !target.evented || target && !target.selectable && activeObject && activeObject !== target;
+        },
+        _shouldCenterTransform: function(target) {
+            if (!target) {
+                return;
+            }
+            var t = this._currentTransform, centerTransform;
+            if (t.action === "scale" || t.action === "scaleX" || t.action === "scaleY") {
+                centerTransform = this.centeredScaling || target.centeredScaling;
+            } else if (t.action === "rotate") {
+                centerTransform = this.centeredRotation || target.centeredRotation;
+            }
+            return centerTransform ? !t.altKey : t.altKey;
+        },
+        _getOriginFromCorner: function(target, corner) {
+            var origin = {
+                x: target.originX,
+                y: target.originY
+            };
+            if (corner === "ml" || corner === "tl" || corner === "bl") {
+                origin.x = "right";
+            } else if (corner === "mr" || corner === "tr" || corner === "br") {
+                origin.x = "left";
+            }
+            if (corner === "tl" || corner === "mt" || corner === "tr") {
+                origin.y = "bottom";
+            } else if (corner === "bl" || corner === "mb" || corner === "br") {
+                origin.y = "top";
+            }
+            return origin;
+        },
+        _getActionFromCorner: function(target, corner, e) {
+            if (!corner) {
+                return "drag";
+            }
+            switch (corner) {
+              case "mtr":
+                return "rotate";
+
+              case "ml":
+              case "mr":
+                return e[this.altActionKey] ? "skewY" : "scaleX";
+
+              case "mt":
+              case "mb":
+                return e[this.altActionKey] ? "skewX" : "scaleY";
+
+              default:
+                return "scale";
+            }
+        },
+        _setupCurrentTransform: function(e, target) {
+            if (!target) {
+                return;
+            }
+            var pointer = this.getPointer(e), corner = target._findTargetCorner(this.getPointer(e, true)), action = this._getActionFromCorner(target, corner, e), origin = this._getOriginFromCorner(target, corner);
+            this._currentTransform = {
+                target: target,
+                action: action,
+                corner: corner,
+                scaleX: target.scaleX,
+                scaleY: target.scaleY,
+                skewX: target.skewX,
+                skewY: target.skewY,
+                offsetX: pointer.x - target.left,
+                offsetY: pointer.y - target.top,
+                originX: origin.x,
+                originY: origin.y,
+                ex: pointer.x,
+                ey: pointer.y,
+                lastX: pointer.x,
+                lastY: pointer.y,
+                left: target.left,
+                top: target.top,
+                theta: degreesToRadians(target.angle),
+                width: target.width * target.scaleX,
+                mouseXSign: 1,
+                mouseYSign: 1,
+                shiftKey: e.shiftKey,
+                altKey: e[this.centeredKey]
+            };
+            this._currentTransform.original = {
+                left: target.left,
+                top: target.top,
+                scaleX: target.scaleX,
+                scaleY: target.scaleY,
+                skewX: target.skewX,
+                skewY: target.skewY,
+                originX: origin.x,
+                originY: origin.y
+            };
+            this._resetCurrentTransform();
+        },
+        _translateObject: function(x, y) {
+            var transform = this._currentTransform, target = transform.target, newLeft = x - transform.offsetX, newTop = y - transform.offsetY, moveX = !target.get("lockMovementX") && target.left !== newLeft, moveY = !target.get("lockMovementY") && target.top !== newTop;
+            moveX && target.set("left", newLeft);
+            moveY && target.set("top", newTop);
+            return moveX || moveY;
+        },
+        _changeSkewTransformOrigin: function(mouseMove, t, by) {
+            var property = "originX", origins = {
+                0: "center"
+            }, skew = t.target.skewX, originA = "left", originB = "right", corner = t.corner === "mt" || t.corner === "ml" ? 1 : -1, flipSign = 1;
+            mouseMove = mouseMove > 0 ? 1 : -1;
+            if (by === "y") {
+                skew = t.target.skewY;
+                originA = "top";
+                originB = "bottom";
+                property = "originY";
+            }
+            origins[-1] = originA;
+            origins[1] = originB;
+            t.target.flipX && (flipSign *= -1);
+            t.target.flipY && (flipSign *= -1);
+            if (skew === 0) {
+                t.skewSign = -corner * mouseMove * flipSign;
+                t[property] = origins[-mouseMove];
+            } else {
+                skew = skew > 0 ? 1 : -1;
+                t.skewSign = skew;
+                t[property] = origins[skew * corner * flipSign];
+            }
+        },
+        _skewObject: function(x, y, by) {
+            var t = this._currentTransform, target = t.target, skewed = false, lockSkewingX = target.get("lockSkewingX"), lockSkewingY = target.get("lockSkewingY");
+            if (lockSkewingX && by === "x" || lockSkewingY && by === "y") {
+                return false;
+            }
+            var center = target.getCenterPoint(), actualMouseByCenter = target.toLocalPoint(new fabric.Point(x, y), "center", "center")[by], lastMouseByCenter = target.toLocalPoint(new fabric.Point(t.lastX, t.lastY), "center", "center")[by], actualMouseByOrigin, constraintPosition, dim = target._getTransformedDimensions();
+            this._changeSkewTransformOrigin(actualMouseByCenter - lastMouseByCenter, t, by);
+            actualMouseByOrigin = target.toLocalPoint(new fabric.Point(x, y), t.originX, t.originY)[by];
+            constraintPosition = target.translateToOriginPoint(center, t.originX, t.originY);
+            skewed = this._setObjectSkew(actualMouseByOrigin, t, by, dim);
+            t.lastX = x;
+            t.lastY = y;
+            target.setPositionByOrigin(constraintPosition, t.originX, t.originY);
+            return skewed;
+        },
+        _setObjectSkew: function(localMouse, transform, by, _dim) {
+            var target = transform.target, newValue, skewed = false, skewSign = transform.skewSign, newDim, dimNoSkew, otherBy, _otherBy, _by, newDimMouse, skewX, skewY;
+            if (by === "x") {
+                otherBy = "y";
+                _otherBy = "Y";
+                _by = "X";
+                skewX = 0;
+                skewY = target.skewY;
+            } else {
+                otherBy = "x";
+                _otherBy = "X";
+                _by = "Y";
+                skewX = target.skewX;
+                skewY = 0;
+            }
+            dimNoSkew = target._getTransformedDimensions(skewX, skewY);
+            newDimMouse = 2 * Math.abs(localMouse) - dimNoSkew[by];
+            if (newDimMouse <= 2) {
+                newValue = 0;
+            } else {
+                newValue = skewSign * Math.atan(newDimMouse / target["scale" + _by] / (dimNoSkew[otherBy] / target["scale" + _otherBy]));
+                newValue = fabric.util.radiansToDegrees(newValue);
+            }
+            skewed = target["skew" + _by] !== newValue;
+            target.set("skew" + _by, newValue);
+            if (target["skew" + _otherBy] !== 0) {
+                newDim = target._getTransformedDimensions();
+                newValue = _dim[otherBy] / newDim[otherBy] * target["scale" + _otherBy];
+                target.set("scale" + _otherBy, newValue);
+            }
+            return skewed;
+        },
+        _scaleObject: function(x, y, by) {
+            var t = this._currentTransform, target = t.target, lockScalingX = target.get("lockScalingX"), lockScalingY = target.get("lockScalingY"), lockScalingFlip = target.get("lockScalingFlip");
+            if (lockScalingX && lockScalingY) {
+                return false;
+            }
+            var constraintPosition = target.translateToOriginPoint(target.getCenterPoint(), t.originX, t.originY), localMouse = target.toLocalPoint(new fabric.Point(x, y), t.originX, t.originY), dim = target._getTransformedDimensions(), scaled = false;
+            this._setLocalMouse(localMouse, t);
+            scaled = this._setObjectScale(localMouse, t, lockScalingX, lockScalingY, by, lockScalingFlip, dim);
+            target.setPositionByOrigin(constraintPosition, t.originX, t.originY);
+            return scaled;
+        },
+        _setObjectScale: function(localMouse, transform, lockScalingX, lockScalingY, by, lockScalingFlip, _dim) {
+            var target = transform.target, forbidScalingX = false, forbidScalingY = false, scaled = false, changeX, changeY, scaleX, scaleY;
+            scaleX = localMouse.x * target.scaleX / _dim.x;
+            scaleY = localMouse.y * target.scaleY / _dim.y;
+            changeX = target.scaleX !== scaleX;
+            changeY = target.scaleY !== scaleY;
+            if (lockScalingFlip && scaleX <= 0 && scaleX < target.scaleX) {
+                forbidScalingX = true;
+            }
+            if (lockScalingFlip && scaleY <= 0 && scaleY < target.scaleY) {
+                forbidScalingY = true;
+            }
+            if (by === "equally" && !lockScalingX && !lockScalingY) {
+                forbidScalingX || forbidScalingY || (scaled = this._scaleObjectEqually(localMouse, target, transform, _dim));
+            } else if (!by) {
+                forbidScalingX || lockScalingX || target.set("scaleX", scaleX) && (scaled = scaled || changeX);
+                forbidScalingY || lockScalingY || target.set("scaleY", scaleY) && (scaled = scaled || changeY);
+            } else if (by === "x" && !target.get("lockUniScaling")) {
+                forbidScalingX || lockScalingX || target.set("scaleX", scaleX) && (scaled = scaled || changeX);
+            } else if (by === "y" && !target.get("lockUniScaling")) {
+                forbidScalingY || lockScalingY || target.set("scaleY", scaleY) && (scaled = scaled || changeY);
+            }
+            transform.newScaleX = scaleX;
+            transform.newScaleY = scaleY;
+            forbidScalingX || forbidScalingY || this._flipObject(transform, by);
+            return scaled;
+        },
+        _scaleObjectEqually: function(localMouse, target, transform, _dim) {
+            var dist = localMouse.y + localMouse.x, lastDist = _dim.y * transform.original.scaleY / target.scaleY + _dim.x * transform.original.scaleX / target.scaleX, scaled;
+            transform.newScaleX = transform.original.scaleX * dist / lastDist;
+            transform.newScaleY = transform.original.scaleY * dist / lastDist;
+            scaled = transform.newScaleX !== target.scaleX || transform.newScaleY !== target.scaleY;
+            target.set("scaleX", transform.newScaleX);
+            target.set("scaleY", transform.newScaleY);
+            return scaled;
+        },
+        _flipObject: function(transform, by) {
+            if (transform.newScaleX < 0 && by !== "y") {
+                if (transform.originX === "left") {
+                    transform.originX = "right";
+                } else if (transform.originX === "right") {
+                    transform.originX = "left";
+                }
+            }
+            if (transform.newScaleY < 0 && by !== "x") {
+                if (transform.originY === "top") {
+                    transform.originY = "bottom";
+                } else if (transform.originY === "bottom") {
+                    transform.originY = "top";
+                }
+            }
+        },
+        _setLocalMouse: function(localMouse, t) {
+            var target = t.target, zoom = this.getZoom(), padding = target.padding / zoom;
+            if (t.originX === "right") {
+                localMouse.x *= -1;
+            } else if (t.originX === "center") {
+                localMouse.x *= t.mouseXSign * 2;
+                if (localMouse.x < 0) {
+                    t.mouseXSign = -t.mouseXSign;
+                }
+            }
+            if (t.originY === "bottom") {
+                localMouse.y *= -1;
+            } else if (t.originY === "center") {
+                localMouse.y *= t.mouseYSign * 2;
+                if (localMouse.y < 0) {
+                    t.mouseYSign = -t.mouseYSign;
+                }
+            }
+            if (abs(localMouse.x) > padding) {
+                if (localMouse.x < 0) {
+                    localMouse.x += padding;
+                } else {
+                    localMouse.x -= padding;
+                }
+            } else {
+                localMouse.x = 0;
+            }
+            if (abs(localMouse.y) > padding) {
+                if (localMouse.y < 0) {
+                    localMouse.y += padding;
+                } else {
+                    localMouse.y -= padding;
+                }
+            } else {
+                localMouse.y = 0;
+            }
+        },
+        _rotateObject: function(x, y) {
+            var t = this._currentTransform;
+            if (t.target.get("lockRotation")) {
+                return false;
+            }
+            var lastAngle = atan2(t.ey - t.top, t.ex - t.left), curAngle = atan2(y - t.top, x - t.left), angle = radiansToDegrees(curAngle - lastAngle + t.theta), hasRoated = true;
+            if (t.target.snapAngle > 0) {
+                var snapAngle = t.target.snapAngle, snapThreshold = t.target.snapThreshold || snapAngle, rightAngleLocked = Math.ceil(angle / snapAngle) * snapAngle, leftAngleLocked = Math.floor(angle / snapAngle) * snapAngle;
+                if (Math.abs(angle - leftAngleLocked) < snapThreshold) {
+                    angle = leftAngleLocked;
+                } else if (Math.abs(angle - rightAngleLocked) < snapThreshold) {
+                    angle = rightAngleLocked;
+                }
+            }
+            if (angle < 0) {
+                angle = 360 + angle;
+            }
+            angle %= 360;
+            if (t.target.angle === angle) {
+                hasRoated = false;
+            } else {
+                t.target.angle = angle;
+            }
+            return hasRoated;
+        },
+        setCursor: function(value) {
+            this.upperCanvasEl.style.cursor = value;
+        },
+        _resetObjectTransform: function(target) {
+            target.scaleX = 1;
+            target.scaleY = 1;
+            target.skewX = 0;
+            target.skewY = 0;
+            target.setAngle(0);
+        },
+        _drawSelection: function(ctx) {
+            var groupSelector = this._groupSelector, left = groupSelector.left, top = groupSelector.top, aleft = abs(left), atop = abs(top);
+            if (this.selectionColor) {
+                ctx.fillStyle = this.selectionColor;
+                ctx.fillRect(groupSelector.ex - (left > 0 ? 0 : -left), groupSelector.ey - (top > 0 ? 0 : -top), aleft, atop);
+            }
+            if (!this.selectionLineWidth || !this.selectionBorderColor) {
+                return;
+            }
+            ctx.lineWidth = this.selectionLineWidth;
+            ctx.strokeStyle = this.selectionBorderColor;
+            if (this.selectionDashArray.length > 1 && !supportLineDash) {
+                var px = groupSelector.ex + STROKE_OFFSET - (left > 0 ? 0 : aleft), py = groupSelector.ey + STROKE_OFFSET - (top > 0 ? 0 : atop);
+                ctx.beginPath();
+                fabric.util.drawDashedLine(ctx, px, py, px + aleft, py, this.selectionDashArray);
+                fabric.util.drawDashedLine(ctx, px, py + atop - 1, px + aleft, py + atop - 1, this.selectionDashArray);
+                fabric.util.drawDashedLine(ctx, px, py, px, py + atop, this.selectionDashArray);
+                fabric.util.drawDashedLine(ctx, px + aleft - 1, py, px + aleft - 1, py + atop, this.selectionDashArray);
+                ctx.closePath();
+                ctx.stroke();
+            } else {
+                fabric.Object.prototype._setLineDash.call(this, ctx, this.selectionDashArray);
+                ctx.strokeRect(groupSelector.ex + STROKE_OFFSET - (left > 0 ? 0 : aleft), groupSelector.ey + STROKE_OFFSET - (top > 0 ? 0 : atop), aleft, atop);
+            }
+        },
+        findTarget: function(e, skipGroup) {
+            if (this.skipTargetFind) {
+                return;
+            }
+            var ignoreZoom = true, pointer = this.getPointer(e, ignoreZoom), activeGroup = this.getActiveGroup(), activeObject = this.getActiveObject(), activeTarget;
+            this.targets = [];
+            if (activeGroup && !skipGroup && activeGroup === this._searchPossibleTargets([ activeGroup ], pointer)) {
+                this._fireOverOutEvents(activeGroup, e);
+                return activeGroup;
+            }
+            if (activeObject && activeObject._findTargetCorner(pointer)) {
+                this._fireOverOutEvents(activeObject, e);
+                return activeObject;
+            }
+            if (activeObject && activeObject === this._searchPossibleTargets([ activeObject ], pointer)) {
+                if (!this.preserveObjectStacking) {
+                    this._fireOverOutEvents(activeObject, e);
+                    return activeObject;
+                } else {
+                    activeTarget = activeObject;
+                }
+            }
+            var target = this._searchPossibleTargets(this._objects, pointer);
+            if (e[this.altSelectionKey] && target && activeTarget && target !== activeTarget) {
+                target = activeTarget;
+            }
+            this._fireOverOutEvents(target, e);
+            return target;
+        },
+        _fireOverOutEvents: function(target, e) {
+            var overOpt, outOpt, hoveredTarget = this._hoveredTarget;
+            if (hoveredTarget !== target) {
+                overOpt = {
+                    e: e,
+                    target: target,
+                    previousTarget: this._hoveredTarget
+                };
+                outOpt = {
+                    e: e,
+                    target: this._hoveredTarget,
+                    nextTarget: target
+                };
+                this._hoveredTarget = target;
+            }
+            if (target) {
+                if (hoveredTarget !== target) {
+                    if (hoveredTarget) {
+                        this.fire("mouse:out", outOpt);
+                        hoveredTarget.fire("mouseout", outOpt);
+                    }
+                    this.fire("mouse:over", overOpt);
+                    target.fire("mouseover", overOpt);
+                }
+            } else if (hoveredTarget) {
+                this.fire("mouse:out", outOpt);
+                hoveredTarget.fire("mouseout", outOpt);
+            }
+        },
+        _checkTarget: function(pointer, obj) {
+            if (obj && obj.visible && obj.evented && this.containsPoint(null, obj, pointer)) {
+                if ((this.perPixelTargetFind || obj.perPixelTargetFind) && !obj.isEditing) {
+                    var isTransparent = this.isTargetTransparent(obj, pointer.x, pointer.y);
+                    if (!isTransparent) {
+                        return true;
+                    }
+                } else {
+                    return true;
+                }
+            }
+        },
+        _searchPossibleTargets: function(objects, pointer) {
+            var target, i = objects.length, normalizedPointer, subTarget;
+            while (i--) {
+                if (this._checkTarget(pointer, objects[i])) {
+                    target = objects[i];
+                    if (target.type === "group" && target.subTargetCheck) {
+                        normalizedPointer = this._normalizePointer(target, pointer);
+                        subTarget = this._searchPossibleTargets(target._objects, normalizedPointer);
+                        subTarget && this.targets.push(subTarget);
+                    }
+                    break;
+                }
+            }
+            return target;
+        },
+        restorePointerVpt: function(pointer) {
+            return fabric.util.transformPoint(pointer, fabric.util.invertTransform(this.viewportTransform));
+        },
+        getPointer: function(e, ignoreZoom, upperCanvasEl) {
+            if (!upperCanvasEl) {
+                upperCanvasEl = this.upperCanvasEl;
+            }
+            var pointer = getPointer(e), bounds = upperCanvasEl.getBoundingClientRect(), boundsWidth = bounds.width || 0, boundsHeight = bounds.height || 0, cssScale;
+            if (!boundsWidth || !boundsHeight) {
+                if ("top" in bounds && "bottom" in bounds) {
+                    boundsHeight = Math.abs(bounds.top - bounds.bottom);
+                }
+                if ("right" in bounds && "left" in bounds) {
+                    boundsWidth = Math.abs(bounds.right - bounds.left);
+                }
+            }
+            this.calcOffset();
+            pointer.x = pointer.x - this._offset.left;
+            pointer.y = pointer.y - this._offset.top;
+            if (!ignoreZoom) {
+                pointer = this.restorePointerVpt(pointer);
+            }
+            if (boundsWidth === 0 || boundsHeight === 0) {
+                cssScale = {
+                    width: 1,
+                    height: 1
+                };
+            } else {
+                cssScale = {
+                    width: upperCanvasEl.width / boundsWidth,
+                    height: upperCanvasEl.height / boundsHeight
+                };
+            }
+            return {
+                x: pointer.x * cssScale.width,
+                y: pointer.y * cssScale.height
+            };
+        },
+        _createUpperCanvas: function() {
+            var lowerCanvasClass = this.lowerCanvasEl.className.replace(/\s*lower-canvas\s*/, "");
+            this.upperCanvasEl = this._createCanvasElement();
+            fabric.util.addClass(this.upperCanvasEl, "upper-canvas " + lowerCanvasClass);
+            this.wrapperEl.appendChild(this.upperCanvasEl);
+            this._copyCanvasStyle(this.lowerCanvasEl, this.upperCanvasEl);
+            this._applyCanvasStyle(this.upperCanvasEl);
+            this.contextTop = this.upperCanvasEl.getContext("2d");
+        },
+        _createCacheCanvas: function() {
+            this.cacheCanvasEl = this._createCanvasElement();
+            this.cacheCanvasEl.setAttribute("width", this.width);
+            this.cacheCanvasEl.setAttribute("height", this.height);
+            this.contextCache = this.cacheCanvasEl.getContext("2d");
+        },
+        _initWrapperElement: function() {
+            this.wrapperEl = fabric.util.wrapElement(this.lowerCanvasEl, "div", {
+                class: this.containerClass
+            });
+            fabric.util.setStyle(this.wrapperEl, {
+                width: this.getWidth() + "px",
+                height: this.getHeight() + "px",
+                position: "relative"
+            });
+            fabric.util.makeElementUnselectable(this.wrapperEl);
+        },
+        _applyCanvasStyle: function(element) {
+            var width = this.getWidth() || element.width, height = this.getHeight() || element.height;
+            fabric.util.setStyle(element, {
+                position: "absolute",
+                width: width + "px",
+                height: height + "px",
+                left: 0,
+                top: 0,
+                "touch-action": "none"
+            });
+            element.width = width;
+            element.height = height;
+            fabric.util.makeElementUnselectable(element);
+        },
+        _copyCanvasStyle: function(fromEl, toEl) {
+            toEl.style.cssText = fromEl.style.cssText;
+        },
+        getSelectionContext: function() {
+            return this.contextTop;
+        },
+        getSelectionElement: function() {
+            return this.upperCanvasEl;
+        },
+        _setActiveObject: function(object) {
+            var obj = this._activeObject;
+            if (obj) {
+                obj.set("active", false);
+                if (object !== obj && obj.onDeselect && typeof obj.onDeselect === "function") {
+                    obj.onDeselect();
+                }
+            }
+            this._activeObject = object;
+            object.set("active", true);
+        },
+        setActiveObject: function(object, e) {
+            var currentActiveObject = this.getActiveObject();
+            if (currentActiveObject && currentActiveObject !== object) {
+                currentActiveObject.fire("deselected", {
+                    e: e
+                });
+            }
+            this._setActiveObject(object);
+            this.fire("object:selected", {
+                target: object,
+                e: e
+            });
+            object.fire("selected", {
+                e: e
+            });
+            this.renderAll();
+            return this;
+        },
+        getActiveObject: function() {
+            return this._activeObject;
+        },
+        _onObjectRemoved: function(obj) {
+            if (this.getActiveObject() === obj) {
+                this.fire("before:selection:cleared", {
+                    target: obj
+                });
+                this._discardActiveObject();
+                this.fire("selection:cleared", {
+                    target: obj
+                });
+                obj.fire("deselected");
+            }
+            if (this._hoveredTarget === obj) {
+                this._hoveredTarget = null;
+            }
+            this.callSuper("_onObjectRemoved", obj);
+        },
+        _discardActiveObject: function() {
+            var obj = this._activeObject;
+            if (obj) {
+                obj.set("active", false);
+                if (obj.onDeselect && typeof obj.onDeselect === "function") {
+                    obj.onDeselect();
+                }
+            }
+            this._activeObject = null;
+        },
+        discardActiveObject: function(e) {
+            var activeObject = this._activeObject;
+            if (activeObject) {
+                this.fire("before:selection:cleared", {
+                    target: activeObject,
+                    e: e
+                });
+                this._discardActiveObject();
+                this.fire("selection:cleared", {
+                    e: e
+                });
+                activeObject.fire("deselected", {
+                    e: e
+                });
+            }
+            return this;
+        },
+        _setActiveGroup: function(group) {
+            this._activeGroup = group;
+            if (group) {
+                group.set("active", true);
+            }
+        },
+        setActiveGroup: function(group, e) {
+            this._setActiveGroup(group);
+            if (group) {
+                this.fire("object:selected", {
+                    target: group,
+                    e: e
+                });
+                group.fire("selected", {
+                    e: e
+                });
+            }
+            return this;
+        },
+        getActiveGroup: function() {
+            return this._activeGroup;
+        },
+        _discardActiveGroup: function() {
+            var g = this.getActiveGroup();
+            if (g) {
+                g.destroy();
+            }
+            this.setActiveGroup(null);
+        },
+        discardActiveGroup: function(e) {
+            var g = this.getActiveGroup();
+            if (g) {
+                this.fire("before:selection:cleared", {
+                    e: e,
+                    target: g
+                });
+                this._discardActiveGroup();
+                this.fire("selection:cleared", {
+                    e: e
+                });
+            }
+            return this;
+        },
+        deactivateAll: function() {
+            var allObjects = this.getObjects(), i = 0, len = allObjects.length, obj;
+            for (;i < len; i++) {
+                obj = allObjects[i];
+                obj && obj.set("active", false);
+            }
+            this._discardActiveGroup();
+            this._discardActiveObject();
+            return this;
+        },
+        deactivateAllWithDispatch: function(e) {
+            var allObjects = this.getObjects(), i = 0, len = allObjects.length, obj;
+            for (;i < len; i++) {
+                obj = allObjects[i];
+                obj && obj.set("active", false);
+            }
+            this.discardActiveGroup(e);
+            this.discardActiveObject(e);
+            return this;
+        },
+        dispose: function() {
+            this.callSuper("dispose");
+            var wrapper = this.wrapperEl;
+            this.removeListeners();
+            wrapper.removeChild(this.upperCanvasEl);
+            wrapper.removeChild(this.lowerCanvasEl);
+            delete this.upperCanvasEl;
+            if (wrapper.parentNode) {
+                wrapper.parentNode.replaceChild(this.lowerCanvasEl, this.wrapperEl);
+            }
+            delete this.wrapperEl;
+            return this;
+        },
+        clear: function() {
+            this.discardActiveGroup();
+            this.discardActiveObject();
+            this.clearContext(this.contextTop);
+            return this.callSuper("clear");
+        },
+        drawControls: function(ctx) {
+            var activeGroup = this.getActiveGroup();
+            if (activeGroup) {
+                activeGroup._renderControls(ctx);
+            } else {
+                this._drawObjectsControls(ctx);
+            }
+        },
+        _drawObjectsControls: function(ctx) {
+            for (var i = 0, len = this._objects.length; i < len; ++i) {
+                if (!this._objects[i] || !this._objects[i].active) {
+                    continue;
+                }
+                this._objects[i]._renderControls(ctx);
+            }
+        },
+        _toObject: function(instance, methodName, propertiesToInclude) {
+            var originalProperties = this._realizeGroupTransformOnObject(instance), object = this.callSuper("_toObject", instance, methodName, propertiesToInclude);
+            this._unwindGroupTransformOnObject(instance, originalProperties);
+            return object;
+        },
+        _realizeGroupTransformOnObject: function(instance) {
+            var layoutProps = [ "angle", "flipX", "flipY", "height", "left", "scaleX", "scaleY", "top", "width" ];
+            if (instance.group && instance.group === this.getActiveGroup()) {
+                var originalValues = {};
+                layoutProps.forEach(function(prop) {
+                    originalValues[prop] = instance[prop];
+                });
+                this.getActiveGroup().realizeTransform(instance);
+                return originalValues;
+            } else {
+                return null;
+            }
+        },
+        _unwindGroupTransformOnObject: function(instance, originalValues) {
+            if (originalValues) {
+                instance.set(originalValues);
+            }
+        },
+        _setSVGObject: function(markup, instance, reviver) {
+            var originalProperties;
+            originalProperties = this._realizeGroupTransformOnObject(instance);
+            this.callSuper("_setSVGObject", markup, instance, reviver);
+            this._unwindGroupTransformOnObject(instance, originalProperties);
+        }
+    });
+    for (var prop in fabric.StaticCanvas) {
+        if (prop !== "prototype") {
+            fabric.Canvas[prop] = fabric.StaticCanvas[prop];
+        }
+    }
+    if (fabric.isTouchSupported) {
+        fabric.Canvas.prototype._setCursorFromEvent = function() {};
+    }
+    fabric.Element = fabric.Canvas;
+})();
+
+(function() {
+    var cursorOffset = {
+        mt: 0,
+        tr: 1,
+        mr: 2,
+        br: 3,
+        mb: 4,
+        bl: 5,
+        ml: 6,
+        tl: 7
+    }, addListener = fabric.util.addListener, removeListener = fabric.util.removeListener, RIGHT_CLICK = 3, MIDDLE_CLICK = 2, LEFT_CLICK = 1;
+    function checkClick(e, value) {
+        return "which" in e ? e.which === value : e.button === value - 1;
+    }
+    fabric.util.object.extend(fabric.Canvas.prototype, {
+        cursorMap: [ "n-resize", "ne-resize", "e-resize", "se-resize", "s-resize", "sw-resize", "w-resize", "nw-resize" ],
+        _initEventListeners: function() {
+            this._bindEvents();
+            addListener(fabric.window, "resize", this._onResize);
+            addListener(this.upperCanvasEl, "mousedown", this._onMouseDown);
+            addListener(this.upperCanvasEl, "mousemove", this._onMouseMove);
+            addListener(this.upperCanvasEl, "mouseout", this._onMouseOut);
+            addListener(this.upperCanvasEl, "mouseenter", this._onMouseEnter);
+            addListener(this.upperCanvasEl, "wheel", this._onMouseWheel);
+            addListener(this.upperCanvasEl, "contextmenu", this._onContextMenu);
+            addListener(this.upperCanvasEl, "touchstart", this._onMouseDown, {
+                passive: false
+            });
+            addListener(this.upperCanvasEl, "touchmove", this._onMouseMove, {
+                passive: false
+            });
+            if (typeof eventjs !== "undefined" && "add" in eventjs) {
+                eventjs.add(this.upperCanvasEl, "gesture", this._onGesture);
+                eventjs.add(this.upperCanvasEl, "drag", this._onDrag);
+                eventjs.add(this.upperCanvasEl, "orientation", this._onOrientationChange);
+                eventjs.add(this.upperCanvasEl, "shake", this._onShake);
+                eventjs.add(this.upperCanvasEl, "longpress", this._onLongPress);
+            }
+        },
+        _bindEvents: function() {
+            this._onMouseDown = this._onMouseDown.bind(this);
+            this._onMouseMove = this._onMouseMove.bind(this);
+            this._onMouseUp = this._onMouseUp.bind(this);
+            this._onResize = this._onResize.bind(this);
+            this._onGesture = this._onGesture.bind(this);
+            this._onDrag = this._onDrag.bind(this);
+            this._onShake = this._onShake.bind(this);
+            this._onLongPress = this._onLongPress.bind(this);
+            this._onOrientationChange = this._onOrientationChange.bind(this);
+            this._onMouseWheel = this._onMouseWheel.bind(this);
+            this._onMouseOut = this._onMouseOut.bind(this);
+            this._onMouseEnter = this._onMouseEnter.bind(this);
+            this._onContextMenu = this._onContextMenu.bind(this);
+        },
+        removeListeners: function() {
+            removeListener(fabric.window, "resize", this._onResize);
+            removeListener(this.upperCanvasEl, "mousedown", this._onMouseDown);
+            removeListener(this.upperCanvasEl, "mousemove", this._onMouseMove);
+            removeListener(this.upperCanvasEl, "mouseout", this._onMouseOut);
+            removeListener(this.upperCanvasEl, "mouseenter", this._onMouseEnter);
+            removeListener(this.upperCanvasEl, "wheel", this._onMouseWheel);
+            removeListener(this.upperCanvasEl, "contextmenu", this._onContextMenu);
+            removeListener(this.upperCanvasEl, "touchstart", this._onMouseDown);
+            removeListener(this.upperCanvasEl, "touchmove", this._onMouseMove);
+            if (typeof eventjs !== "undefined" && "remove" in eventjs) {
+                eventjs.remove(this.upperCanvasEl, "gesture", this._onGesture);
+                eventjs.remove(this.upperCanvasEl, "drag", this._onDrag);
+                eventjs.remove(this.upperCanvasEl, "orientation", this._onOrientationChange);
+                eventjs.remove(this.upperCanvasEl, "shake", this._onShake);
+                eventjs.remove(this.upperCanvasEl, "longpress", this._onLongPress);
+            }
+        },
+        _onGesture: function(e, self) {
+            this.__onTransformGesture && this.__onTransformGesture(e, self);
+        },
+        _onDrag: function(e, self) {
+            this.__onDrag && this.__onDrag(e, self);
+        },
+        _onMouseWheel: function(e) {
+            this.__onMouseWheel(e);
+        },
+        _onMouseOut: function(e) {
+            var target = this._hoveredTarget;
+            this.fire("mouse:out", {
+                target: target,
+                e: e
+            });
+            this._hoveredTarget = null;
+            target && target.fire("mouseout", {
+                e: e
+            });
+            if (this._iTextInstances) {
+                this._iTextInstances.forEach(function(obj) {
+                    if (obj.isEditing) {
+                        obj.hiddenTextarea.focus();
+                    }
+                });
+            }
+        },
+        _onMouseEnter: function(e) {
+            if (!this.findTarget(e)) {
+                this.fire("mouse:over", {
+                    target: null,
+                    e: e
+                });
+                this._hoveredTarget = null;
+            }
+        },
+        _onOrientationChange: function(e, self) {
+            this.__onOrientationChange && this.__onOrientationChange(e, self);
+        },
+        _onShake: function(e, self) {
+            this.__onShake && this.__onShake(e, self);
+        },
+        _onLongPress: function(e, self) {
+            this.__onLongPress && this.__onLongPress(e, self);
+        },
+        _onContextMenu: function(e) {
+            if (this.stopContextMenu) {
+                e.stopPropagation();
+                e.preventDefault();
+            }
+            return false;
+        },
+        _onMouseDown: function(e) {
+            this.__onMouseDown(e);
+            addListener(fabric.document, "touchend", this._onMouseUp, {
+                passive: false
+            });
+            addListener(fabric.document, "touchmove", this._onMouseMove, {
+                passive: false
+            });
+            removeListener(this.upperCanvasEl, "mousemove", this._onMouseMove);
+            removeListener(this.upperCanvasEl, "touchmove", this._onMouseMove);
+            if (e.type === "touchstart") {
+                removeListener(this.upperCanvasEl, "mousedown", this._onMouseDown);
+            } else {
+                addListener(fabric.document, "mouseup", this._onMouseUp);
+                addListener(fabric.document, "mousemove", this._onMouseMove);
+            }
+        },
+        _onMouseUp: function(e) {
+            this.__onMouseUp(e);
+            removeListener(fabric.document, "mouseup", this._onMouseUp);
+            removeListener(fabric.document, "touchend", this._onMouseUp);
+            removeListener(fabric.document, "mousemove", this._onMouseMove);
+            removeListener(fabric.document, "touchmove", this._onMouseMove);
+            addListener(this.upperCanvasEl, "mousemove", this._onMouseMove);
+            addListener(this.upperCanvasEl, "touchmove", this._onMouseMove, {
+                passive: false
+            });
+            if (e.type === "touchend") {
+                var _this = this;
+                setTimeout(function() {
+                    addListener(_this.upperCanvasEl, "mousedown", _this._onMouseDown);
+                }, 400);
+            }
+        },
+        _onMouseMove: function(e) {
+            !this.allowTouchScrolling && e.preventDefault && e.preventDefault();
+            this.__onMouseMove(e);
+        },
+        _onResize: function() {
+            this.calcOffset();
+        },
+        _shouldRender: function(target, pointer) {
+            var activeObject = this.getActiveGroup() || this.getActiveObject();
+            if (activeObject && activeObject.isEditing && target === activeObject) {
+                return false;
+            }
+            return !!(target && (target.isMoving || target !== activeObject) || !target && !!activeObject || !target && !activeObject && !this._groupSelector || pointer && this._previousPointer && this.selection && (pointer.x !== this._previousPointer.x || pointer.y !== this._previousPointer.y));
+        },
+        __onMouseUp: function(e) {
+            var target;
+            if (checkClick(e, RIGHT_CLICK)) {
+                if (this.fireRightClick) {
+                    this._handleEvent(e, "up", target, RIGHT_CLICK);
+                }
+                return;
+            }
+            if (checkClick(e, MIDDLE_CLICK)) {
+                if (this.fireMiddleClick) {
+                    this._handleEvent(e, "up", target, MIDDLE_CLICK);
+                }
+                return;
+            }
+            if (this.isDrawingMode && this._isCurrentlyDrawing) {
+                this._onMouseUpInDrawingMode(e);
+                return;
+            }
+            var searchTarget = true, transform = this._currentTransform, groupSelector = this._groupSelector, isClick = !groupSelector || groupSelector.left === 0 && groupSelector.top === 0;
+            if (transform) {
+                this._finalizeCurrentTransform();
+                searchTarget = !transform.actionPerformed;
+            }
+            target = searchTarget ? this.findTarget(e, true) : transform.target;
+            var shouldRender = this._shouldRender(target, this.getPointer(e));
+            if (target || !isClick) {
+                this._maybeGroupObjects(e);
+            } else {
+                this._groupSelector = null;
+                this._currentTransform = null;
+            }
+            if (target) {
+                target.isMoving = false;
+            }
+            this._setCursorFromEvent(e, target);
+            this._handleEvent(e, "up", target ? target : null, LEFT_CLICK, isClick);
+            target && (target.__corner = 0);
+            shouldRender && this.renderAll();
+        },
+        _handleEvent: function(e, eventType, targetObj, button, isClick) {
+            var target = typeof targetObj === "undefined" ? this.findTarget(e) : targetObj, targets = this.targets || [], options = {
+                e: e,
+                target: target,
+                subTargets: targets,
+                button: button || LEFT_CLICK,
+                isClick: isClick || false
+            };
+            this.fire("mouse:" + eventType, options);
+            target && target.fire("mouse" + eventType, options);
+            for (var i = 0; i < targets.length; i++) {
+                targets[i].fire("mouse" + eventType, options);
+            }
+        },
+        _finalizeCurrentTransform: function() {
+            var transform = this._currentTransform, target = transform.target;
+            if (target._scaling) {
+                target._scaling = false;
+            }
+            target.setCoords();
+            this._restoreOriginXY(target);
+            if (transform.actionPerformed || this.stateful && target.hasStateChanged()) {
+                this.fire("object:modified", {
+                    target: target
+                });
+                target.fire("modified");
+            }
+        },
+        _restoreOriginXY: function(target) {
+            if (this._previousOriginX && this._previousOriginY) {
+                var originPoint = target.translateToOriginPoint(target.getCenterPoint(), this._previousOriginX, this._previousOriginY);
+                target.originX = this._previousOriginX;
+                target.originY = this._previousOriginY;
+                target.left = originPoint.x;
+                target.top = originPoint.y;
+                this._previousOriginX = null;
+                this._previousOriginY = null;
+            }
+        },
+        _onMouseDownInDrawingMode: function(e) {
+            this._isCurrentlyDrawing = true;
+            this.discardActiveObject(e).renderAll();
+            if (this.clipTo) {
+                fabric.util.clipContext(this, this.contextTop);
+            }
+            var pointer = this.getPointer(e);
+            this.freeDrawingBrush.onMouseDown(pointer);
+            this._handleEvent(e, "down");
+        },
+        _onMouseMoveInDrawingMode: function(e) {
+            if (this._isCurrentlyDrawing) {
+                var pointer = this.getPointer(e);
+                this.freeDrawingBrush.onMouseMove(pointer);
+            }
+            this.setCursor(this.freeDrawingCursor);
+            this._handleEvent(e, "move");
+        },
+        _onMouseUpInDrawingMode: function(e) {
+            this._isCurrentlyDrawing = false;
+            if (this.clipTo) {
+                this.contextTop.restore();
+            }
+            this.freeDrawingBrush.onMouseUp();
+            this._handleEvent(e, "up");
+        },
+        __onMouseDown: function(e) {
+            var target = this.findTarget(e);
+            if (checkClick(e, RIGHT_CLICK)) {
+                if (this.fireRightClick) {
+                    this._handleEvent(e, "down", target ? target : null, RIGHT_CLICK);
+                }
+                return;
+            }
+            if (checkClick(e, MIDDLE_CLICK)) {
+                if (this.fireMiddleClick) {
+                    this._handleEvent(e, "down", target ? target : null, MIDDLE_CLICK);
+                }
+                return;
+            }
+            if (this.isDrawingMode) {
+                this._onMouseDownInDrawingMode(e);
+                return;
+            }
+            if (this._currentTransform) {
+                return;
+            }
+            var pointer = this.getPointer(e, true);
+            this._previousPointer = pointer;
+            var shouldRender = this._shouldRender(target, pointer), shouldGroup = this._shouldGroup(e, target);
+            if (this._shouldClearSelection(e, target)) {
+                this.deactivateAllWithDispatch(e);
+            } else if (shouldGroup) {
+                this._handleGrouping(e, target);
+                target = this.getActiveGroup();
+            }
+            if (this.selection && (!target || !target.selectable && !target.isEditing)) {
+                this._groupSelector = {
+                    ex: pointer.x,
+                    ey: pointer.y,
+                    top: 0,
+                    left: 0
+                };
+            }
+            if (target) {
+                if (target.selectable && (target.__corner || !shouldGroup)) {
+                    this._beforeTransform(e, target);
+                    this._setupCurrentTransform(e, target);
+                }
+                var activeObject = this.getActiveObject();
+                if (target !== this.getActiveGroup() && target !== activeObject) {
+                    this.deactivateAll();
+                    if (target.selectable) {
+                        activeObject && activeObject.fire("deselected", {
+                            e: e
+                        });
+                        this.setActiveObject(target, e);
+                    }
+                }
+            }
+            this._handleEvent(e, "down", target ? target : null);
+            shouldRender && this.renderAll();
+        },
+        _beforeTransform: function(e, target) {
+            this.stateful && target.saveState();
+            if (target._findTargetCorner(this.getPointer(e))) {
+                this.onBeforeScaleRotate(target);
+            }
+        },
+        _setOriginToCenter: function(target) {
+            this._previousOriginX = this._currentTransform.target.originX;
+            this._previousOriginY = this._currentTransform.target.originY;
+            var center = target.getCenterPoint();
+            target.originX = "center";
+            target.originY = "center";
+            target.left = center.x;
+            target.top = center.y;
+            this._currentTransform.left = target.left;
+            this._currentTransform.top = target.top;
+        },
+        _setCenterToOrigin: function(target) {
+            var originPoint = target.translateToOriginPoint(target.getCenterPoint(), this._previousOriginX, this._previousOriginY);
+            target.originX = this._previousOriginX;
+            target.originY = this._previousOriginY;
+            target.left = originPoint.x;
+            target.top = originPoint.y;
+            this._previousOriginX = null;
+            this._previousOriginY = null;
+        },
+        __onMouseMove: function(e) {
+            var target, pointer;
+            if (this.isDrawingMode) {
+                this._onMouseMoveInDrawingMode(e);
+                return;
+            }
+            if (typeof e.touches !== "undefined" && e.touches.length > 1) {
+                return;
+            }
+            var groupSelector = this._groupSelector;
+            if (groupSelector) {
+                pointer = this.getPointer(e, true);
+                groupSelector.left = pointer.x - groupSelector.ex;
+                groupSelector.top = pointer.y - groupSelector.ey;
+                this.renderTop();
+            } else if (!this._currentTransform) {
+                target = this.findTarget(e);
+                this._setCursorFromEvent(e, target);
+            } else {
+                this._transformObject(e);
+            }
+            this._handleEvent(e, "move", target ? target : null);
+        },
+        __onMouseWheel: function(e) {
+            this._handleEvent(e, "wheel");
+        },
+        _transformObject: function(e) {
+            var pointer = this.getPointer(e), transform = this._currentTransform;
+            transform.reset = false;
+            transform.target.isMoving = true;
+            transform.shiftKey = e.shiftKey;
+            transform.altKey = e[this.centeredKey];
+            this._beforeScaleTransform(e, transform);
+            this._performTransformAction(e, transform, pointer);
+            transform.actionPerformed && this.renderAll();
+        },
+        _performTransformAction: function(e, transform, pointer) {
+            var x = pointer.x, y = pointer.y, target = transform.target, action = transform.action, actionPerformed = false;
+            if (action === "rotate") {
+                (actionPerformed = this._rotateObject(x, y)) && this._fire("rotating", target, e);
+            } else if (action === "scale") {
+                (actionPerformed = this._onScale(e, transform, x, y)) && this._fire("scaling", target, e);
+            } else if (action === "scaleX") {
+                (actionPerformed = this._scaleObject(x, y, "x")) && this._fire("scaling", target, e);
+            } else if (action === "scaleY") {
+                (actionPerformed = this._scaleObject(x, y, "y")) && this._fire("scaling", target, e);
+            } else if (action === "skewX") {
+                (actionPerformed = this._skewObject(x, y, "x")) && this._fire("skewing", target, e);
+            } else if (action === "skewY") {
+                (actionPerformed = this._skewObject(x, y, "y")) && this._fire("skewing", target, e);
+            } else {
+                actionPerformed = this._translateObject(x, y);
+                if (actionPerformed) {
+                    this._fire("moving", target, e);
+                    this.setCursor(target.moveCursor || this.moveCursor);
+                }
+            }
+            transform.actionPerformed = transform.actionPerformed || actionPerformed;
+        },
+        _fire: function(eventName, target, e) {
+            this.fire("object:" + eventName, {
+                target: target,
+                e: e
+            });
+            target.fire(eventName, {
+                e: e
+            });
+        },
+        _beforeScaleTransform: function(e, transform) {
+            if (transform.action === "scale" || transform.action === "scaleX" || transform.action === "scaleY") {
+                var centerTransform = this._shouldCenterTransform(transform.target);
+                if (centerTransform && (transform.originX !== "center" || transform.originY !== "center") || !centerTransform && transform.originX === "center" && transform.originY === "center") {
+                    this._resetCurrentTransform();
+                    transform.reset = true;
+                }
+            }
+        },
+        _onScale: function(e, transform, x, y) {
+            if ((e[this.uniScaleKey] || this.uniScaleTransform) && !transform.target.get("lockUniScaling")) {
+                transform.currentAction = "scale";
+                return this._scaleObject(x, y);
+            } else {
+                if (!transform.reset && transform.currentAction === "scale") {
+                    this._resetCurrentTransform();
+                }
+                transform.currentAction = "scaleEqually";
+                return this._scaleObject(x, y, "equally");
+            }
+        },
+        _setCursorFromEvent: function(e, target) {
+            if (!target || !target.selectable) {
+                this.setCursor(this.defaultCursor);
+                return false;
+            }
+            var hoverCursor = target.hoverCursor || this.hoverCursor, activeGroup = this.getActiveGroup(), corner = target._findTargetCorner && (!activeGroup || !activeGroup.contains(target)) && target._findTargetCorner(this.getPointer(e, true));
+            if (!corner) {
+                this.setCursor(hoverCursor);
+            } else {
+                this._setCornerCursor(corner, target, e);
+            }
+            return true;
+        },
+        _setCornerCursor: function(corner, target, e) {
+            if (corner in cursorOffset) {
+                this.setCursor(this._getRotatedCornerCursor(corner, target, e));
+            } else if (corner === "mtr" && target.hasRotatingPoint) {
+                this.setCursor(this.rotationCursor);
+            } else {
+                this.setCursor(this.defaultCursor);
+                return false;
+            }
+        },
+        _getRotatedCornerCursor: function(corner, target, e) {
+            var n = Math.round(target.getAngle() % 360 / 45);
+            if (n < 0) {
+                n += 8;
+            }
+            n += cursorOffset[corner];
+            if (e[this.altActionKey] && cursorOffset[corner] % 2 === 0) {
+                n += 2;
+            }
+            n %= 8;
+            return this.cursorMap[n];
+        }
+    });
+})();
+
+(function() {
+    var min = Math.min, max = Math.max;
+    fabric.util.object.extend(fabric.Canvas.prototype, {
+        _shouldGroup: function(e, target) {
+            var activeObject = this.getActiveObject();
+            return e[this.selectionKey] && target && target.selectable && (this.getActiveGroup() || activeObject && activeObject !== target) && this.selection;
+        },
+        _handleGrouping: function(e, target) {
+            var activeGroup = this.getActiveGroup();
+            if (target === activeGroup) {
+                target = this.findTarget(e, true);
+                if (!target) {
+                    return;
+                }
+            }
+            if (activeGroup) {
+                this._updateActiveGroup(target, e);
+            } else {
+                this._createActiveGroup(target, e);
+            }
+            if (this._activeGroup) {
+                this._activeGroup.saveCoords();
+            }
+        },
+        _updateActiveGroup: function(target, e) {
+            var activeGroup = this.getActiveGroup();
+            if (activeGroup.contains(target)) {
+                activeGroup.removeWithUpdate(target);
+                target.set("active", false);
+                if (activeGroup.size() === 1) {
+                    this.discardActiveGroup(e);
+                    this.setActiveObject(activeGroup.item(0), e);
+                    return;
+                }
+            } else {
+                activeGroup.addWithUpdate(target);
+            }
+            this.fire("selection:created", {
+                target: activeGroup,
+                e: e
+            });
+            activeGroup.set("active", true);
+        },
+        _createActiveGroup: function(target, e) {
+            if (this._activeObject && target !== this._activeObject) {
+                var group = this._createGroup(target);
+                group.addWithUpdate();
+                this.setActiveGroup(group, e);
+                this._activeObject = null;
+                this.fire("selection:created", {
+                    target: group,
+                    e: e
+                });
+            }
+            target.set("active", true);
+        },
+        _createGroup: function(target) {
+            var objects = this.getObjects(), isActiveLower = objects.indexOf(this._activeObject) < objects.indexOf(target), groupObjects = isActiveLower ? [ this._activeObject, target ] : [ target, this._activeObject ];
+            this._activeObject.isEditing && this._activeObject.exitEditing();
+            return new fabric.Group(groupObjects, {
+                canvas: this
+            });
+        },
+        _groupSelectedObjects: function(e) {
+            var group = this._collectObjects();
+            if (group.length === 1) {
+                this.setActiveObject(group[0], e);
+            } else if (group.length > 1) {
+                group = new fabric.Group(group.reverse(), {
+                    canvas: this
+                });
+                group.addWithUpdate();
+                this.setActiveGroup(group, e);
+                group.saveCoords();
+                this.fire("selection:created", {
+                    target: group,
+                    e: e
+                });
+                this.renderAll();
+            }
+        },
+        _collectObjects: function() {
+            var group = [], currentObject, x1 = this._groupSelector.ex, y1 = this._groupSelector.ey, x2 = x1 + this._groupSelector.left, y2 = y1 + this._groupSelector.top, selectionX1Y1 = new fabric.Point(min(x1, x2), min(y1, y2)), selectionX2Y2 = new fabric.Point(max(x1, x2), max(y1, y2)), isClick = x1 === x2 && y1 === y2;
+            for (var i = this._objects.length; i--; ) {
+                currentObject = this._objects[i];
+                if (!currentObject || !currentObject.selectable || !currentObject.visible) {
+                    continue;
+                }
+                if (currentObject.intersectsWithRect(selectionX1Y1, selectionX2Y2) || currentObject.isContainedWithinRect(selectionX1Y1, selectionX2Y2) || currentObject.containsPoint(selectionX1Y1) || currentObject.containsPoint(selectionX2Y2)) {
+                    currentObject.set("active", true);
+                    group.push(currentObject);
+                    if (isClick) {
+                        break;
+                    }
+                }
+            }
+            return group;
+        },
+        _maybeGroupObjects: function(e) {
+            if (this.selection && this._groupSelector) {
+                this._groupSelectedObjects(e);
+            }
+            var activeGroup = this.getActiveGroup();
+            if (activeGroup) {
+                activeGroup.setObjectsCoords().setCoords();
+                activeGroup.isMoving = false;
+                this.setCursor(this.defaultCursor);
+            }
+            this._groupSelector = null;
+            this._currentTransform = null;
+        }
+    });
+})();
+
+(function() {
     var supportQuality = fabric.StaticCanvas.supports("toDataURLWithQuality");
     fabric.util.object.extend(fabric.StaticCanvas.prototype, {
         toDataURL: function(options) {
@@ -5378,6 +6853,194 @@ fabric.util.object.extend(fabric.Object.prototype, {
             this["_" + propertySet] = {};
             this.saveState(options);
             return this;
+        }
+    });
+})();
+
+(function() {
+    var degreesToRadians = fabric.util.degreesToRadians, isVML = function() {
+        return typeof G_vmlCanvasManager !== "undefined";
+    };
+    fabric.util.object.extend(fabric.Object.prototype, {
+        _controlsVisibility: null,
+        _findTargetCorner: function(pointer) {
+            if (!this.hasControls || !this.active) {
+                return false;
+            }
+            var ex = pointer.x, ey = pointer.y, xPoints, lines;
+            this.__corner = 0;
+            for (var i in this.oCoords) {
+                if (!this.isControlVisible(i)) {
+                    continue;
+                }
+                if (i === "mtr" && !this.hasRotatingPoint) {
+                    continue;
+                }
+                if (this.get("lockUniScaling") && (i === "mt" || i === "mr" || i === "mb" || i === "ml")) {
+                    continue;
+                }
+                lines = this._getImageLines(this.oCoords[i].corner);
+                xPoints = this._findCrossPoints({
+                    x: ex,
+                    y: ey
+                }, lines);
+                if (xPoints !== 0 && xPoints % 2 === 1) {
+                    this.__corner = i;
+                    return i;
+                }
+            }
+            return false;
+        },
+        _setCornerCoords: function() {
+            var coords = this.oCoords, newTheta = degreesToRadians(45 - this.angle), cornerHypotenuse = this.cornerSize * .707106, cosHalfOffset = cornerHypotenuse * Math.cos(newTheta), sinHalfOffset = cornerHypotenuse * Math.sin(newTheta), x, y;
+            for (var point in coords) {
+                x = coords[point].x;
+                y = coords[point].y;
+                coords[point].corner = {
+                    tl: {
+                        x: x - sinHalfOffset,
+                        y: y - cosHalfOffset
+                    },
+                    tr: {
+                        x: x + cosHalfOffset,
+                        y: y - sinHalfOffset
+                    },
+                    bl: {
+                        x: x - cosHalfOffset,
+                        y: y + sinHalfOffset
+                    },
+                    br: {
+                        x: x + sinHalfOffset,
+                        y: y + cosHalfOffset
+                    }
+                };
+            }
+        },
+        drawSelectionBackground: function(ctx) {
+            if (!this.selectionBackgroundColor || this.group || !this.active || this.canvas && !this.canvas.interactive) {
+                return this;
+            }
+            ctx.save();
+            var center = this.getCenterPoint(), wh = this._calculateCurrentDimensions(), vpt = this.canvas.viewportTransform;
+            ctx.translate(center.x, center.y);
+            ctx.scale(1 / vpt[0], 1 / vpt[3]);
+            ctx.rotate(degreesToRadians(this.angle));
+            ctx.fillStyle = this.selectionBackgroundColor;
+            ctx.fillRect(-wh.x / 2, -wh.y / 2, wh.x, wh.y);
+            ctx.restore();
+            return this;
+        },
+        drawBorders: function(ctx) {
+            if (!this.hasBorders) {
+                return this;
+            }
+            var wh = this._calculateCurrentDimensions(), strokeWidth = 1 / this.borderScaleFactor, width = wh.x + strokeWidth, height = wh.y + strokeWidth;
+            ctx.save();
+            ctx.strokeStyle = this.borderColor;
+            this._setLineDash(ctx, this.borderDashArray, null);
+            ctx.strokeRect(-width / 2, -height / 2, width, height);
+            if (this.hasRotatingPoint && this.isControlVisible("mtr") && !this.get("lockRotation") && this.hasControls) {
+                var rotateHeight = -height / 2;
+                ctx.beginPath();
+                ctx.moveTo(0, rotateHeight);
+                ctx.lineTo(0, rotateHeight - this.rotatingPointOffset);
+                ctx.closePath();
+                ctx.stroke();
+            }
+            ctx.restore();
+            return this;
+        },
+        drawBordersInGroup: function(ctx, options) {
+            if (!this.hasBorders) {
+                return this;
+            }
+            var p = this._getNonTransformedDimensions(), matrix = fabric.util.customTransformMatrix(options.scaleX, options.scaleY, options.skewX), wh = fabric.util.transformPoint(p, matrix), strokeWidth = 1 / this.borderScaleFactor, width = wh.x + strokeWidth, height = wh.y + strokeWidth;
+            ctx.save();
+            this._setLineDash(ctx, this.borderDashArray, null);
+            ctx.strokeStyle = this.borderColor;
+            ctx.strokeRect(-width / 2, -height / 2, width, height);
+            ctx.restore();
+            return this;
+        },
+        drawControls: function(ctx) {
+            if (!this.hasControls) {
+                return this;
+            }
+            var wh = this._calculateCurrentDimensions(), width = wh.x, height = wh.y, scaleOffset = this.cornerSize, left = -(width + scaleOffset) / 2, top = -(height + scaleOffset) / 2, methodName = this.transparentCorners ? "stroke" : "fill";
+            ctx.save();
+            ctx.strokeStyle = ctx.fillStyle = this.cornerColor;
+            if (!this.transparentCorners) {
+                ctx.strokeStyle = this.cornerStrokeColor;
+            }
+            this._setLineDash(ctx, this.cornerDashArray, null);
+            this._drawControl("tl", ctx, methodName, left, top);
+            this._drawControl("tr", ctx, methodName, left + width, top);
+            this._drawControl("bl", ctx, methodName, left, top + height);
+            this._drawControl("br", ctx, methodName, left + width, top + height);
+            if (!this.get("lockUniScaling")) {
+                this._drawControl("mt", ctx, methodName, left + width / 2, top);
+                this._drawControl("mb", ctx, methodName, left + width / 2, top + height);
+                this._drawControl("mr", ctx, methodName, left + width, top + height / 2);
+                this._drawControl("ml", ctx, methodName, left, top + height / 2);
+            }
+            if (this.hasRotatingPoint) {
+                this._drawControl("mtr", ctx, methodName, left + width / 2, top - this.rotatingPointOffset);
+            }
+            ctx.restore();
+            return this;
+        },
+        _drawControl: function(control, ctx, methodName, left, top) {
+            if (!this.isControlVisible(control)) {
+                return;
+            }
+            var size = this.cornerSize, stroke = !this.transparentCorners && this.cornerStrokeColor;
+            switch (this.cornerStyle) {
+              case "circle":
+                ctx.beginPath();
+                ctx.arc(left + size / 2, top + size / 2, size / 2, 0, 2 * Math.PI, false);
+                ctx[methodName]();
+                if (stroke) {
+                    ctx.stroke();
+                }
+                break;
+
+              default:
+                isVML() || this.transparentCorners || ctx.clearRect(left, top, size, size);
+                ctx[methodName + "Rect"](left, top, size, size);
+                if (stroke) {
+                    ctx.strokeRect(left, top, size, size);
+                }
+            }
+        },
+        isControlVisible: function(controlName) {
+            return this._getControlsVisibility()[controlName];
+        },
+        setControlVisible: function(controlName, visible) {
+            this._getControlsVisibility()[controlName] = visible;
+            return this;
+        },
+        setControlsVisibility: function(options) {
+            options || (options = {});
+            for (var p in options) {
+                this.setControlVisible(p, options[p]);
+            }
+            return this;
+        },
+        _getControlsVisibility: function() {
+            if (!this._controlsVisibility) {
+                this._controlsVisibility = {
+                    tl: true,
+                    tr: true,
+                    br: true,
+                    bl: true,
+                    ml: true,
+                    mt: true,
+                    mr: true,
+                    mb: true,
+                    mtr: true
+                };
+            }
+            return this._controlsVisibility;
         }
     });
 })();
