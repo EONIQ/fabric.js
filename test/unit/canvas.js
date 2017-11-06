@@ -466,6 +466,37 @@
     canvas.remove(group);
   });
 
+  test('findTarget with subTargetCheck on activeObject and preserveObjectStacking true', function() {
+    var rect = makeRect({ left: 0, top: 0 }),
+        rect2 = makeRect({ left: 30, top:  30}), target,
+        group = new fabric.Group([rect, rect2]);
+    canvas.preserveObjectStacking = true;
+    canvas.add(group);
+    canvas.setActiveObject(group);
+    group.subTargetCheck = true;
+    target = canvas.findTarget({
+      clientX: 9, clientY: 9
+    });
+    equal(target, group, 'Should return the group');
+    equal(canvas.targets[0], rect, 'should return the rect');
+
+    target = canvas.findTarget({
+      clientX: 9, clientY: 9
+    });
+
+    target = canvas.findTarget({
+      clientX: 9, clientY: 9
+    });
+
+    target = canvas.findTarget({
+      clientX: 9, clientY: 9
+    });
+
+    equal(canvas.targets.length, 1, 'multiple calls to subtarget should not add more to targets');
+
+    canvas.remove(group);
+  });
+
   test('findTarget with perPixelTargetFind', function() {
     ok(typeof canvas.findTarget == 'function');
     var triangle = makeTriangle({ left: 0, top: 0 }), target;
@@ -599,6 +630,17 @@
     equal(canvas._objects[1], rect1, 'rect1 should be the new second');
     equal(canvas._objects[2], rect2, 'rect2 should be the third object');
     equal(canvas._objects[3], rect4, 'rect4 did not move');
+    canvas.bringForward(group);
+    equal(canvas._objects[0], rect3, 'rect3 should be the new last');
+    equal(canvas._objects[1], rect4, 'rect4 should be the new second');
+    equal(canvas._objects[2], rect1, 'rect1 should be the third object');
+    equal(canvas._objects[3], rect2, 'rect2 is the new top');
+    canvas.bringForward(group);
+    canvas.bringForward(group);
+    equal(canvas._objects[0], rect3, 'rect3 should be the new last');
+    equal(canvas._objects[1], rect4, 'rect4 should be the new second');
+    equal(canvas._objects[2], rect1, 'rect1 is still third');
+    equal(canvas._objects[3], rect2, 'rect2 is still new top');
   });
 
   test('activeGroup sendBackwards', function() {
@@ -618,6 +660,17 @@
     equal(canvas._objects[1], rect3, 'rect3 should be shifted down by 1');
     equal(canvas._objects[2], rect4, 'rect4 should be shifted down by 1');
     equal(canvas._objects[3], rect2, 'rect2 is the new top');
+    canvas.sendBackwards(group);
+    equal(canvas._objects[0], rect3, 'rect3 is  last');
+    equal(canvas._objects[1], rect4, 'rect4 should be shifted down by 1');
+    equal(canvas._objects[2], rect1, 'rect1 should be shifted down by 1');
+    equal(canvas._objects[3], rect2, 'rect2 is still on top');
+    canvas.sendBackwards(group);
+    canvas.sendBackwards(group);
+    equal(canvas._objects[0], rect3, 'rect3 is still last');
+    equal(canvas._objects[1], rect4, 'rect4 should be steady');
+    equal(canvas._objects[2], rect1, 'rect1 should be steady');
+    equal(canvas._objects[3], rect2, 'rect2 is still on top');
   });
 
   test('toDataURL', function() {
@@ -1828,5 +1881,160 @@
     canvas.__onMouseMove(e2);
     canvas.__onMouseUp(e2);
     equal(isClick, false, 'moving the pointer, the click is false');
+  });
+
+  test('avoid multiple bindings', function() {
+    var el2 = fabric.document.createElement('canvas');
+    var c = fabric.isLikelyNode ? fabric.createCanvasForNode() : new fabric.Canvas(el2);
+    var eventsArray = [
+      c._onMouseDown,
+      c._onMouseMove,
+      c._onMouseUp,
+      c._onResize,
+      c._onGesture,
+      c._onDrag,
+      c._onShake,
+      c._onLongPress,
+      c._onOrientationChange,
+      c._onMouseWheel,
+      c._onMouseOut,
+      c._onMouseEnter,
+      c._onContextMenu
+    ];
+    // initialize canvas more than once
+    c.initialize(el2);
+    c.initialize(el2);
+    var eventsArray2 = [
+      c._onMouseDown,
+      c._onMouseMove,
+      c._onMouseUp,
+      c._onResize,
+      c._onGesture,
+      c._onDrag,
+      c._onShake,
+      c._onLongPress,
+      c._onOrientationChange,
+      c._onMouseWheel,
+      c._onMouseOut,
+      c._onMouseEnter,
+      c._onContextMenu
+    ];
+    deepEqual(eventsArray, eventsArray2, 'after first initialize, functions do not change.');
+  });
+
+  test('avoid multiple registration - mousedown', function() {
+    var el2 = fabric.document.createElement('canvas');
+    var originalMouseDown = fabric.Canvas.prototype._onMouseDown;
+    var counter = 0;
+    fabric.Canvas.prototype._onMouseDown = function() {
+      counter++;
+    };
+    var c = fabric.isLikelyNode ? fabric.createCanvasForNode() : new fabric.Canvas(el2);
+    // initialize canvas more than once
+    c.initialize(el2);
+    c.initialize(el2);
+    var event = fabric.document.createEvent('MouseEvent');
+    event.initEvent('mousedown', true, true);
+    c.upperCanvasEl.dispatchEvent(event);
+    equal(counter, 1, 'listener executed once');
+    fabric.Canvas.prototype._onMouseDown = originalMouseDown;
+  });
+
+  test('avoid multiple registration - mousemove', function() {
+    var el2 = fabric.document.createElement('canvas');
+    var originalMouseMove = fabric.Canvas.prototype._onMouseMove;
+    var counter = 0;
+    fabric.Canvas.prototype._onMouseMove = function() {
+      counter++;
+    };
+    var c = fabric.isLikelyNode ? fabric.createCanvasForNode() : new fabric.Canvas(el2);
+    // initialize canvas more than once
+    c.initialize(el2);
+    c.initialize(el2);
+    var event = fabric.document.createEvent('MouseEvent');
+    event.initEvent('mousemove', true, true);
+    c.upperCanvasEl.dispatchEvent(event);
+    equal(counter, 1, 'listener executed once');
+    fabric.Canvas.prototype._onMouseMove = originalMouseMove;
+  });
+
+  asyncTest('avoid multiple registration - mouseup', function() {
+    var el2 = fabric.document.createElement('canvas');
+    var originalMouseUp = fabric.Canvas.prototype._onMouseUp;
+    var counter = 0;
+    fabric.Canvas.prototype._onMouseUp = function() {
+      counter++;
+    };
+    var c = fabric.isLikelyNode ? fabric.createCanvasForNode() : new fabric.Canvas(el2);
+    // initialize canvas more than once
+    c.initialize(el2);
+    c.initialize(el2);
+
+    // a mouse down is necessary to register mouse up.
+    var _event = fabric.document.createEvent('MouseEvent');
+    _event.initEvent('mousedown', true, true);
+    c.upperCanvasEl.dispatchEvent(_event);
+    setTimeout(function() {
+      var event = fabric.document.createEvent('MouseEvent');
+      event.initEvent('mouseup', true, true);
+      fabric.document.dispatchEvent(event);
+      equal(counter, 1, 'listener executed once');
+      fabric.Canvas.prototype._onMouseUp = originalMouseUp;
+      start();
+    }, 200);
+  });
+
+  test('avoid multiple registration - mouseout', function() {
+    var el2 = fabric.document.createElement('canvas');
+    var originalMouseOut = fabric.Canvas.prototype._onMouseOut;
+    var counter = 0;
+    fabric.Canvas.prototype._onMouseOut = function() {
+      counter++;
+    };
+    var c = this.canvas = fabric.isLikelyNode ? fabric.createCanvasForNode() : new fabric.Canvas(el2);
+    // initialize canvas more than once
+    c.initialize(el2);
+    c.initialize(el2);
+    var event = fabric.document.createEvent('MouseEvent');
+    event.initEvent('mouseout', true, true);
+    c.upperCanvasEl.dispatchEvent(event);
+    equal(counter, 1, 'listener executed once');
+    fabric.Canvas.prototype._onMouseOut = originalMouseOut;
+  });
+
+  test('avoid multiple registration - mouseenter', function() {
+    var el2 = fabric.document.createElement('canvas');
+    var originalMouseEnter = fabric.Canvas.prototype._onMouseEnter;
+    var counter = 0;
+    fabric.Canvas.prototype._onMouseEnter = function() {
+      counter++;
+    };
+    var c = this.canvas = fabric.isLikelyNode ? fabric.createCanvasForNode() : new fabric.Canvas(el2);
+    // initialize canvas more than once
+    c.initialize(el2);
+    c.initialize(el2);
+    var event = fabric.document.createEvent('MouseEvent');
+    event.initEvent('mouseenter', true, true);
+    c.upperCanvasEl.dispatchEvent(event);
+    equal(counter, 1, 'listener executed once');
+    fabric.Canvas.prototype._onMouseEnter = originalMouseEnter;
+  });
+
+  test('avoid multiple events on window', function() {
+    var el2 = fabric.document.createElement('canvas');
+    var originalResize = fabric.Canvas.prototype._onResize;
+    var counter = 0;
+    fabric.Canvas.prototype._onResize = function() {
+      counter++;
+    };
+    var c = this.canvas = fabric.isLikelyNode ? fabric.createCanvasForNode() : new fabric.Canvas(el2);
+    // initialize canvas more than once
+    c.initialize(el2);
+    c.initialize(el2);
+    var event = fabric.document.createEvent('UIEvents');
+    event.initUIEvent('resize', true, false, fabric.window, 0);
+    fabric.window.dispatchEvent(event);
+    equal(counter, 1, 'listener on window executed once');
+    fabric.Canvas.prototype._onResize = originalResize;
   });
 })();
