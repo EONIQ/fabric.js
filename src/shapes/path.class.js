@@ -29,8 +29,11 @@
     return;
   }
 
+  var stateProperties = fabric.Object.prototype.stateProperties.concat();
+  stateProperties.push('path');
+
   var cacheProperties = fabric.Object.prototype.cacheProperties.concat();
-  cacheProperties.push('path');
+  cacheProperties.push('path', 'fillRule');
 
   /**
    * Path class
@@ -71,6 +74,8 @@
 
     cacheProperties: cacheProperties,
 
+    stateProperties: stateProperties,
+
     /**
      * Constructor
      * @param {Array|String} path Path data (sequence of coordinates and corresponding "command" tokens)
@@ -79,10 +84,7 @@
      */
     initialize: function(path, options) {
       options = options || { };
-
-      if (options) {
-        this.setOptions(options);
-      }
+      this.callSuper('initialize', options);
 
       if (!path) {
         path = [];
@@ -104,10 +106,6 @@
       }
 
       this._setPositionDimensions(options);
-
-      if (this.objectCaching) {
-        this._createCacheCanvas();
-      }
     },
 
     /**
@@ -931,7 +929,7 @@
         path = elements[0];
         delete object.path;
 
-        fabric.util.object.extend(path, object);
+        path.setOptions(object);
         path.setSourcePath(pathUrl);
 
         callback && callback(path);

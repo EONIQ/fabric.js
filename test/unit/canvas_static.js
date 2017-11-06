@@ -897,6 +897,24 @@
     equal(canvas.toObject().objects.length, 1, 'only one object gets exported');
   });
 
+  test('toObject excludeFromExport bgImage overlay', function() {
+    var rect = makeRect(), rect2 = makeRect(), rect3 = makeRect();
+    canvas.clear();
+    canvas.backgroundImage = rect;
+    canvas.overlayImage = rect2;
+    canvas.add(rect3);
+    var rectToObject = rect.toObject();
+    var rect2ToObject = rect2.toObject();
+    var canvasToObject = canvas.toObject();
+    deepEqual(canvasToObject.backgroundImage, rectToObject, 'background exported');
+    deepEqual(canvasToObject.overlayImage, rect2ToObject, 'overlay exported');
+    rect.excludeFromExport = true;
+    rect2.excludeFromExport = true;
+    canvasToObject = canvas.toObject();
+    equal(canvasToObject.backgroundImage, undefined, 'background not exported');
+    equal(canvasToObject.overlayImage, undefined, 'overlay not exported');
+  });
+
 
   test('toDatalessObject', function() {
     ok(typeof canvas.toDatalessObject == 'function');
@@ -1485,6 +1503,44 @@
     deepEqual(canvas.vptCoords.tr, new fabric.Point(30 + canvas.getWidth() / 2, -30), 'tl is 0,0');
     deepEqual(canvas.vptCoords.bl, new fabric.Point(30, canvas.getHeight() / 2 - 30), 'tl is 0,0');
     deepEqual(canvas.vptCoords.br, new fabric.Point(30 + canvas.getWidth() / 2, canvas.getHeight() / 2 - 30), 'tl is 0,0');
+  });
+
+  test('_isRetinaScaling', function() {
+    canvas.enableRetinaScaling = true;
+    fabric.devicePixelRatio = 2;
+    var isScaling = canvas._isRetinaScaling();
+    equal(isScaling, true, 'retina > 1 and enabled');
+
+    canvas.enableRetinaScaling = false;
+    fabric.devicePixelRatio = 2;
+    var isScaling = canvas._isRetinaScaling();
+    equal(isScaling, false, 'retina > 1 and disabled');
+
+    canvas.enableRetinaScaling = false;
+    fabric.devicePixelRatio = 1;
+    var isScaling = canvas._isRetinaScaling();
+    equal(isScaling, false, 'retina = 1 and disabled');
+
+    canvas.enableRetinaScaling = true;
+    fabric.devicePixelRatio = 1;
+    var isScaling = canvas._isRetinaScaling();
+    equal(isScaling, false, 'retina = 1 and enabled');
+  });
+
+  test('getRetinaScaling', function() {
+    canvas.enableRetinaScaling = true;
+    fabric.devicePixelRatio = 1;
+    var scaling = canvas.getRetinaScaling();
+    equal(scaling, 1, 'retina is devicePixelRatio');
+
+    fabric.devicePixelRatio = 2;
+    var scaling = canvas.getRetinaScaling();
+    equal(scaling, 2, 'retina is devicePixelRatio');
+
+    fabric.devicePixelRatio = 2;
+    canvas.enableRetinaScaling = false;
+    var scaling = canvas.getRetinaScaling();
+    equal(scaling, 1, 'retina is disabled, 1');
   });
 
   //how to test with an exception?

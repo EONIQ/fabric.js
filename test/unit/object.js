@@ -49,6 +49,9 @@
 
   QUnit.module('fabric.Object', {
     teardown: function() {
+      fabric.perfLimitSizeTotal = 2097152;
+      fabric.maxCacheSideLimit = 4096;
+      fabric.minCacheSideLimit = 256;
       canvas.clear();
       canvas.backgroundColor = fabric.Canvas.prototype.backgroundColor;
       canvas.calcOffset();
@@ -741,90 +744,6 @@
     }, 1000);
   });
 
-  asyncTest('animate', function() {
-    var object = new fabric.Object({ left: 20, top: 30, width: 40, height: 50, angle: 43 });
-
-    ok(typeof object.animate == 'function');
-
-    object.animate('left', 40);
-    ok(true, 'animate without options does not crash');
-
-    setTimeout(function() {
-
-      equal(40, Math.round(object.getLeft()));
-      start();
-
-    }, 1000);
-  });
-
-  asyncTest('animate multiple properties', function() {
-    var object = new fabric.Object({ left: 123, top: 124 });
-
-    object.animate({ left: 223, top: 224 });
-
-    setTimeout(function() {
-
-      equal(223, Math.round(object.get('left')));
-      equal(224, Math.round(object.get('top')));
-
-      start();
-
-    }, 1000);
-  });
-
-  asyncTest('animate multiple properties with callback', function() {
-
-    var object = new fabric.Object({ left: 0, top: 0 });
-
-    var changedInvocations = 0;
-    var completeInvocations = 0;
-
-    object.animate({ left: 1, top: 1 }, {
-      duration: 1,
-      onChange: function() {
-        changedInvocations++;
-      },
-      onComplete: function() {
-        completeInvocations++;
-      }
-    });
-
-    setTimeout(function() {
-
-      equal(Math.round(object.get('left')), 1);
-      equal(Math.round(object.get('top')), 1);
-
-      //equal(changedInvocations, 2);
-      equal(completeInvocations, 1);
-
-      start();
-
-    }, 1000);
-  });
-
-  asyncTest('animate with abort', function() {
-    var object = new fabric.Object({ left: 123, top: 124 });
-
-    var context;
-    object.animate({ left: 223, top: 224 }, {
-      abort: function() {
-        context = this;
-        return true;
-      }
-    });
-
-    setTimeout(function() {
-
-      equal(123, Math.round(object.get('left')));
-      equal(124, Math.round(object.get('top')));
-
-      equal(context, object, 'abort should be called in context of an object');
-
-      start();
-
-    }, 100);
-  });
-
   test('observable', function() {
     var object = new fabric.Object({ left: 20, top: 30, width: 40, height: 50, angle: 43 });
 
@@ -1249,7 +1168,7 @@
   });
 
   test('isCacheDirty statefullCache disabled', function() {
-    var object = new fabric.Object({ scaleX: 3, scaleY: 2});
+    var object = new fabric.Object({ scaleX: 3, scaleY: 2, width: 1, height: 2});
     equal(object.dirty, true, 'object is dirty after creation');
     object.cacheProperties = ['propA', 'propB'];
     object.dirty = false;
@@ -1261,7 +1180,7 @@
   });
 
   test('isCacheDirty statefullCache enabled', function() {
-    var object = new fabric.Object({ scaleX: 3, scaleY: 2});
+    var object = new fabric.Object({ scaleX: 3, scaleY: 2, width: 1, height: 2});
     object.cacheProperties = ['propA', 'propB'];
     object.dirty = false;
     object.statefullCache = true;
@@ -1289,6 +1208,9 @@
   });
 
   test('_updateCacheCanvas check if cache canvas should be updated', function() {
+    fabric.perfLimitSizeTotal = 10000;
+    fabric.maxCacheSideLimit = 4096;
+    fabric.minCacheSideLimit = 1;
     var object = new fabric.Object({ width: 10, height: 10, strokeWidth: 0 });
     object._createCacheCanvas();
     equal(object.cacheWidth, 12, 'current cache dimensions are saved');
@@ -1303,6 +1225,108 @@
     equal(object.cacheWidth, 6, 'current cache dimensions is updated');
     object.strokeWidth = 2;
     equal(object._updateCacheCanvas(), true, 'if strokeWidth change, it returns true');
+  });
+
+  test('_limitCacheSize limit min to 256', function() {
+    fabric.perfLimitSizeTotal = 10000;
+    fabric.maxCacheSideLimit = 4096;
+    fabric.minCacheSideLimit = 256;
+    var object = new fabric.Object({ width: 200, height: 200, strokeWidth: 0 });
+    var dims = object._getCacheCanvasDimensions();
+    var zoomX = dims.zoomX;
+    var zoomY = dims.zoomY;
+    var limitedDims = object._limitCacheSize(dims);
+    equal(dims, limitedDims, 'object is mutated');
+    equal(dims.width, 256, 'width gets minimum to the cacheSideLimit');
+    equal(dims.height, 256, 'height gets minimum to the cacheSideLimit');
+    equal(zoomX, dims.zoomX, 'zoom factor X does not need a change');
+    equal(zoomY, dims.zoomY, 'zoom factor Y does not need a change');
+  });
+
+  test('_limitCacheSize does not limit if not necessary', function() {
+    fabric.perfLimitSizeTotal = 1000000;
+    fabric.maxCacheSideLimit = 4096;
+    fabric.minCacheSideLimit = 256;
+    var object = new fabric.Object({ width: 400, height: 400, strokeWidth: 0 });
+    var dims = object._getCacheCanvasDimensions();
+    var zoomX = dims.zoomX;
+    var zoomY = dims.zoomY;
+    var limitedDims = object._limitCacheSize(dims);
+    equal(dims, limitedDims, 'object is mutated');
+    equal(dims.width, 402, 'width is in the middle of limits');
+    equal(dims.height, 402, 'height is in the middle of limits');
+    equal(zoomX, dims.zoomX, 'zoom factor X does not need a change');
+    equal(zoomY, dims.zoomY, 'zoom factor Y does not need a change');
+  });
+
+  test('_limitCacheSize does cap up minCacheSideLimit', function() {
+    fabric.perfLimitSizeTotal = 10000;
+    fabric.maxCacheSideLimit = 4096;
+    fabric.minCacheSideLimit = 256;
+    var object = new fabric.Object({ width: 400, height: 400, strokeWidth: 0 });
+    var dims = object._getCacheCanvasDimensions();
+    var width = dims.width;
+    var height = dims.height;
+    var zoomX = dims.zoomX;
+    var zoomY = dims.zoomY;
+    var limitedDims = object._limitCacheSize(dims);
+    equal(dims, limitedDims, 'object is mutated');
+    equal(dims.width, 256, 'width is capped to min');
+    equal(dims.height, 256, 'height is capped to min');
+    equal(zoomX * dims.width / width, dims.zoomX, 'zoom factor X gets updated to represent the shrink');
+    equal(zoomY * dims.height / height, dims.zoomY, 'zoom factor Y gets updated to represent the shrink');
+  });
+
+  test('_limitCacheSize does cap up if necessary', function() {
+    fabric.perfLimitSizeTotal = 1000000;
+    fabric.maxCacheSideLimit = 4096;
+    fabric.minCacheSideLimit = 256;
+    var object = new fabric.Object({ width: 2046, height: 2046, strokeWidth: 0 });
+    var dims = object._getCacheCanvasDimensions();
+    var width = dims.width;
+    var height = dims.height;
+    var zoomX = dims.zoomX;
+    var zoomY = dims.zoomY;
+    var limitedDims = object._limitCacheSize(dims);
+    equal(dims, limitedDims, 'object is mutated');
+    equal(dims.width, 1000, 'width is capped to max allowed by area');
+    equal(dims.height, 1000, 'height is capped to max allowed by area');
+    equal(zoomX * dims.width / width, dims.zoomX, 'zoom factor X gets updated to represent the shrink');
+    equal(zoomY * dims.height / height, dims.zoomY, 'zoom factor Y gets updated to represent the shrink');
+  });
+
+  test('_limitCacheSize does cap up if necessary to maxCacheSideLimit', function() {
+    fabric.perfLimitSizeTotal = 100000000;
+    fabric.maxCacheSideLimit = 4096;
+    fabric.minCacheSideLimit = 256;
+    var object = new fabric.Object({ width: 8192, height: 8192, strokeWidth: 0 });
+    var dims = object._getCacheCanvasDimensions();
+    var zoomX = dims.zoomX;
+    var zoomY = dims.zoomY;
+    var limitedDims = object._limitCacheSize(dims);
+    equal(dims, limitedDims, 'object is mutated');
+    equal(dims.width, fabric.maxCacheSideLimit, 'width is capped to max allowed by fabric');
+    equal(dims.height, fabric.maxCacheSideLimit, 'height is capped to max allowed by fabric');
+    equal(dims.zoomX, zoomX * 4096 / 8194, 'zoom factor X gets updated to represent the shrink');
+    equal(dims.zoomY, zoomY * 4096 / 8194, 'zoom factor Y gets updated to represent the shrink');
+  });
+
+  test('_limitCacheSize does cap up if necessary to maxCacheSideLimit, different AR', function() {
+    fabric.perfLimitSizeTotal = 100000000;
+    fabric.maxCacheSideLimit = 4096;
+    fabric.minCacheSideLimit = 256;
+    var object = new fabric.Object({ width: 16384, height: 8192, strokeWidth: 0 });
+    var dims = object._getCacheCanvasDimensions();
+    var width = dims.width;
+    var height = dims.height;
+    var zoomX = dims.zoomX;
+    var zoomY = dims.zoomY;
+    var limitedDims = object._limitCacheSize(dims);
+    equal(dims, limitedDims, 'object is mutated');
+    equal(dims.width, fabric.maxCacheSideLimit, 'width is capped to max allowed by fabric');
+    equal(dims.height, fabric.maxCacheSideLimit, 'height is capped to max allowed by fabric');
+    equal(dims.zoomX, zoomX * fabric.maxCacheSideLimit / width, 'zoom factor X gets updated to represent the shrink');
+    equal(dims.zoomY, zoomY * fabric.maxCacheSideLimit / height, 'zoom factor Y gets updated to represent the shrink');
   });
 
   test('_setShadow', function(){
@@ -1335,5 +1359,30 @@
     equal(context.shadowOffsetX, object.shadow.offsetX * object.scaleX * group.scaleX);
     equal(context.shadowOffsetY, object.shadow.offsetY * object.scaleY * group.scaleY);
     equal(context.shadowBlur, object.shadow.blur * (object.scaleX * group.scaleX + object.scaleY * group.scaleY) / 2);
+  });
+
+  test('willDrawShadow', function() {
+    var object = new fabric.Object({ shadow: { offsetX: 0, offsetY: 0 }});
+    equal(object.willDrawShadow(), false, 'object will not drawShadow');
+    object.shadow.offsetX = 1;
+    equal(object.willDrawShadow(), true, 'object will drawShadow');
+  });
+
+  test('_set  change a property', function() {
+    var object = new fabric.Object({ fill: 'blue' });
+    object._set('fill', 'red');
+    equal(object.fill, 'red', 'property changed');
+  });
+  test('_set can rise the dirty flag', function() {
+    var object = new fabric.Object({ fill: 'blue' });
+    object.dirty = false;
+    object._set('fill', 'red');
+    equal(object.dirty, true, 'dirty is rised');
+  });
+  test('_set rise dirty flag only if value changed', function() {
+    var object = new fabric.Object({ fill: 'blue' });
+    object.dirty = false;
+    object._set('fill', 'blue');
+    equal(object.dirty, false, 'dirty is not rised');
   });
 })();
