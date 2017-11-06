@@ -115,6 +115,12 @@
 
   fabric.loadSVGFromString = function(string, callback, reviver) {
     var doc = new DOMParser().parseFromString(string);
+
+    if (!doc || !doc.documentElement) {
+      callback && callback(null);
+      return;
+    }
+
     fabric.parseSVGDocument(doc.documentElement, function(results, options) {
       callback && callback(results, options);
     }, reviver);

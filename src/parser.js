@@ -948,6 +948,7 @@
         }
         if (!xml || !xml.documentElement) {
           callback && callback(null);
+          return
         }
 
         fabric.parseSVGDocument(xml.documentElement, function (results, _options) {
